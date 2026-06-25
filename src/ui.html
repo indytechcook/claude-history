@@ -154,6 +154,7 @@ async function loadSessions(){
   (d.sessions||[]).forEach(s => {
     const row = document.createElement("div");
     row.className = "row" + (s.session_id===activeSession ? " active":"");
+    row.dataset.sessionId = s.session_id;
     const title = document.createElement("div");
     title.className = "title";
     title.textContent = s.title;
@@ -194,7 +195,8 @@ async function runSearch(){
   if(!res.length){ list.innerHTML = `<div class="empty">No matches.</div>`; return; }
   res.forEach(m => {
     const row = document.createElement("div");
-    row.className = "row";
+    row.className = "row" + (m.session_id===activeSession ? " active":"");
+    row.dataset.sessionId = m.session_id;
     const title = document.createElement("div");
     title.className = "snippet";
     title.innerHTML = renderSnippet(m.snippet);
@@ -224,7 +226,8 @@ function setTab(which){
 
 async function openSession(id){
   activeSession = id;
-  document.querySelectorAll(".sidebar .row").forEach(r => r.classList.remove("active"));
+  document.querySelectorAll(".sidebar .row").forEach(r =>
+    r.classList.toggle("active", r.dataset.sessionId === id));
   const d = await getJSON("/api/session/" + encodeURIComponent(id));
   renderTranscript(d);
 }
