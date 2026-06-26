@@ -32,7 +32,52 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// Create all tables and indexes. Idempotent.
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
+    migrate(conn)?;
     Ok(())
+}
+
+/// Small in-place migrations for databases created by older versions.
+fn migrate(conn: &Connection) -> Result<()> {
+    // `parent_session_id` links a subagent transcript (`agent-*.jsonl`, every
+    // record `isSidechain=true`) back to the main-thread session that spawned
+    // it. Older DBs lack the column; add it and backfill from the preserved
+    // `records.raw_json` (each subagent record carries the parent's id in its
+    // own `sessionId` field, which differs from the agent file's id).
+    if !has_column(conn, "sessions", "parent_session_id")? {
+        conn.execute_batch("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;")?;
+        conn.execute_batch(
+            r#"
+            UPDATE sessions
+            SET parent_session_id = (
+                SELECT json_extract(r.raw_json, '$.sessionId')
+                FROM records r
+                WHERE r.session_id = sessions.session_id
+                  AND json_extract(r.raw_json, '$.sessionId') IS NOT NULL
+                  AND json_extract(r.raw_json, '$.sessionId') <> sessions.session_id
+                LIMIT 1
+            )
+            WHERE parent_session_id IS NULL;
+            "#,
+        )?;
+    }
+    // Created here (not in SCHEMA) so it runs only once the column is guaranteed
+    // to exist on both fresh and migrated databases.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);",
+    )?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Drop everything so an import starts fresh.
@@ -76,7 +121,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     first_timestamp TEXT,
     last_timestamp  TEXT,
     record_count    INTEGER DEFAULT 0,
-    message_count   INTEGER DEFAULT 0
+    message_count   INTEGER DEFAULT 0,
+    parent_session_id TEXT  -- set for subagent (agent-*) files: id of the spawning session
 );
 
 -- Every JSONL line is captured here, regardless of type. The full original

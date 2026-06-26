@@ -32,6 +32,10 @@ pub fn serve(db_path: &Path, host: &str, port: u16, open: bool) -> Result<()> {
         let response = match path.as_str() {
             "/" | "/index.html" => html_response(INDEX_HTML),
             "/api/sessions" => json_response(api_sessions(&conn, &params)),
+            "/api/subagents" => json_response(match get_str(&params, "parent") {
+                Some(parent) => api_subagents(&conn, parent),
+                None => Ok(json!({ "subagents": [] })),
+            }),
             "/api/search" => json_response(api_search(&conn, &params)),
             "/api/stats" => json_response(api_stats(&conn)),
             p if p.starts_with("/api/session/") => {
@@ -146,13 +150,18 @@ fn api_sessions(conn: &Connection, p: &HashMap<String, String>) -> Result<Value>
     let project = get_str(p, "project");
     let limit = get_i64(p, "limit", 100).clamp(1, 1000);
 
+    // Only top-level (non-subagent) sessions appear in the main list; each
+    // carries a count of the subagent transcripts it spawned, which the UI
+    // lazy-loads and nests underneath via `/api/subagents`.
     let mut sql = String::from(
         "SELECT session_id, COALESCE(cwd, project_path), custom_title, ai_title,
-                git_branch, last_timestamp, message_count
-         FROM sessions",
+                git_branch, last_timestamp, message_count,
+                (SELECT COUNT(*) FROM sessions c WHERE c.parent_session_id = sessions.session_id)
+         FROM sessions
+         WHERE parent_session_id IS NULL",
     );
     if project.is_some() {
-        sql.push_str(" WHERE (cwd LIKE ?1 OR project_path LIKE ?1 OR project_dir LIKE ?1)");
+        sql.push_str(" AND (cwd LIKE ?1 OR project_path LIKE ?1 OR project_dir LIKE ?1)");
     }
     sql.push_str(" ORDER BY last_timestamp DESC LIMIT ?2");
 
@@ -172,10 +181,41 @@ fn api_sessions(conn: &Connection, p: &HashMap<String, String>) -> Result<Value>
             "branch": r.get::<_, Option<String>>(4)?,
             "last": r.get::<_, Option<String>>(5)?,
             "messages": r.get::<_, i64>(6)?,
+            "subagent_count": r.get::<_, i64>(7)?,
         }))
     })?;
     let items: Vec<Value> = rows.filter_map(|x| x.ok()).collect();
     Ok(json!({ "sessions": items }))
+}
+
+/// Subagent transcripts spawned by a given parent session. Titled by their
+/// first user message — the Task prompt the parent handed the agent — since
+/// subagent files never emit a custom/ai title of their own.
+fn api_subagents(conn: &Connection, parent: &str) -> Result<Value> {
+    let mut stmt = conn.prepare(
+        "SELECT s.session_id, s.last_timestamp, s.message_count,
+                (SELECT m.text_content FROM messages m
+                  WHERE m.session_id = s.session_id AND m.role = 'user'
+                  ORDER BY m.timestamp LIMIT 1)
+         FROM sessions s
+         WHERE s.parent_session_id = ?1
+         ORDER BY s.first_timestamp ASC",
+    )?;
+    let rows = stmt.query_map(params![parent], |r| {
+        let prompt: Option<String> = r.get(3)?;
+        let title = prompt
+            .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(subagent)".to_string());
+        Ok(json!({
+            "session_id": r.get::<_, String>(0)?,
+            "title": title,
+            "last": r.get::<_, Option<String>>(1)?,
+            "messages": r.get::<_, i64>(2)?,
+        }))
+    })?;
+    let items: Vec<Value> = rows.filter_map(|x| x.ok()).collect();
+    Ok(json!({ "subagents": items }))
 }
 
 fn api_search(conn: &Connection, p: &HashMap<String, String>) -> Result<Value> {

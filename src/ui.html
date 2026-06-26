@@ -50,6 +50,13 @@
     display: -webkit-box; -webkit-line-clamp: 10; -webkit-box-orient: vertical;
     overflow: hidden; max-height: 15em; }
   .row .badge { color: var(--accent2); }
+  .row .subtoggle { color: var(--accent2); font-size: 11px; margin-top: 3px;
+    cursor: pointer; user-select: none; display: inline-block; }
+  .row .subtoggle:hover { color: var(--accent); }
+  .row.subagent { padding-left: 26px; background: rgba(0,0,0,.12);
+    border-left: 2px solid var(--accent2); }
+  .row.subagent .title { color: var(--dim); }
+  .row.subagent .title .bot { color: var(--accent2); margin-right: 4px; }
   .tabs { display: flex; border-bottom: 1px solid var(--border); }
   .tab { padding: 8px 14px; cursor: pointer; color: var(--dim); font-size: 12px; }
   .tab.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
@@ -164,7 +171,56 @@ async function loadSessions(){
       + (s.project ? `  ${s.project}` : "");
     row.appendChild(title); row.appendChild(meta);
     row.onclick = () => openSession(s.session_id);
+
+    // Subagents spawned by this session nest underneath, collapsed by default.
+    if(s.subagent_count > 0){
+      const n = s.subagent_count;
+      const tog = document.createElement("div");
+      tog.className = "subtoggle";
+      tog.dataset.expanded = "0";
+      tog.textContent = `▸ ${n} subagent${n>1?"s":""}`;
+      tog.onclick = (e) => { e.stopPropagation(); toggleSubagents(tog, row, s.session_id); };
+      row.appendChild(tog);
+    }
     list.appendChild(row);
+  });
+}
+
+async function toggleSubagents(tog, parentRow, parentId){
+  const open = tog.dataset.expanded === "1";
+  if(open){
+    // Collapse: remove any child rows we inserted after this parent.
+    let el = parentRow.nextElementSibling;
+    while(el && el.classList.contains("subagent") && el.dataset.parentId === parentId){
+      const next = el.nextElementSibling; el.remove(); el = next;
+    }
+    tog.dataset.expanded = "0";
+    tog.textContent = tog.textContent.replace("▾", "▸");
+    return;
+  }
+  tog.dataset.expanded = "1";
+  tog.textContent = tog.textContent.replace("▸", "▾");
+  const d = await getJSON("/api/subagents?parent=" + encodeURIComponent(parentId));
+  let anchor = parentRow;
+  (d.subagents||[]).forEach(c => {
+    const row = document.createElement("div");
+    row.className = "row subagent" + (c.session_id===activeSession ? " active":"");
+    row.dataset.sessionId = c.session_id;
+    row.dataset.parentId = parentId;
+    const title = document.createElement("div");
+    title.className = "title";
+    const bot = document.createElement("span");
+    bot.className = "bot"; bot.textContent = "🤖";
+    title.appendChild(bot);
+    title.appendChild(document.createTextNode(c.title));
+    title.title = c.title;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${shortTime(c.last)} · ${c.messages} msgs · ${shortId(c.session_id)}`;
+    row.appendChild(title); row.appendChild(meta);
+    row.onclick = () => openSession(c.session_id);
+    anchor.after(row);
+    anchor = row;
   });
 }
 

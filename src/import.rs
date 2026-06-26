@@ -118,6 +118,10 @@ fn import_file(conn: &mut Connection, path: &Path, size: i64, mtime: i64) -> Res
     let mut git_branch: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut version: Option<String> = None;
+    // For subagent files (`agent-*.jsonl`), each record's inner `sessionId`
+    // field points at the main-thread session that spawned the agent. It only
+    // differs from the file's own id for these sidechain transcripts.
+    let mut parent_session_id: Option<String> = None;
 
     for (idx, line) in reader.lines().enumerate() {
         let line = line?;
@@ -159,6 +163,13 @@ fn import_file(conn: &mut Connection, path: &Path, size: i64, mtime: i64) -> Res
         }
         if version.is_none() {
             version = rversion.clone();
+        }
+        if parent_session_id.is_none() {
+            if let Some(inner) = str_field(&v, "sessionId") {
+                if inner != session_id {
+                    parent_session_id = Some(inner);
+                }
+            }
         }
 
         tx.execute(
@@ -245,8 +256,8 @@ fn import_file(conn: &mut Connection, path: &Path, size: i64, mtime: i64) -> Res
         "INSERT INTO sessions
             (session_id, project_dir, project_path, file_path, custom_title, ai_title,
              git_branch, cwd, version, first_timestamp, last_timestamp,
-             record_count, message_count)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             record_count, message_count, parent_session_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
          ON CONFLICT(session_id) DO UPDATE SET
             project_dir=excluded.project_dir,
             project_path=excluded.project_path,
@@ -259,7 +270,8 @@ fn import_file(conn: &mut Connection, path: &Path, size: i64, mtime: i64) -> Res
             first_timestamp=excluded.first_timestamp,
             last_timestamp=excluded.last_timestamp,
             record_count=excluded.record_count,
-            message_count=excluded.message_count",
+            message_count=excluded.message_count,
+            parent_session_id=COALESCE(excluded.parent_session_id, sessions.parent_session_id)",
         params![
             session_id,
             project_dir,
@@ -274,6 +286,7 @@ fn import_file(conn: &mut Connection, path: &Path, size: i64, mtime: i64) -> Res
             last_ts,
             record_count as i64,
             message_count as i64,
+            parent_session_id,
         ],
     )?;
 
